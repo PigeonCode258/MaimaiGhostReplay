@@ -58,7 +58,7 @@ Mods\MaimaiGhostReplay.dll  (本 Mod，24 KB)
 **正常开启时你会看到：**
 
 ```
-[GhostReplay] MaimaiGhostReplay v0.1.0 已加载（手势：开始游戏页长按 1+2+7+8 3000ms）
+[GhostReplay] MaimaiGhostReplay v0.6.0 已加载（手势：开始游戏页长按 1+2+7+8 3000ms）
 [GhostReplay] 补丁应用完成: 成功 36 / 失败 0 （共 36）      <-- 必须是 36/0
 [GhostReplay] 手势触发（长按 1/2/7/8 满 3000ms）
 [GhostReplay] 记录模式开启: music=1234 diff=3 (来源 dsi=3 cd=3 levelTab=False) long=False 剩余=3/2
@@ -110,7 +110,7 @@ DumpRecordToLog = true    # 是否把录制明细打进日志（验收完可以�
 
 | 现象 | 先查什么 |
 |---|---|
-| 长按没反应 | 日志里有没有 `补丁应用完成: 成功 24 / 失败 0`；是不是停在正确的页面（GAME START 卡片页）；是不是 2P 在场 |
+| 长按没反应 | 日志里有没有 `补丁应用完成: 成功 36 / 失败 0`；是不是停在正确的页面（GAME START 卡片页）；是不是 2P 在场 |
 | 弹框没有文字 / 还是日文 | `P_WindowMessageIDEnum_GetName` 是否在失败列表里（Harmony 对扩展方法的参数绑定）。这是唯一一个我没法静态验证的补丁 |
 | 第二首没还原 | 日志里 `录制完成: N 个 note` 的 N 是不是 0；`第二首匹配成功` 有没有出现 |
 | 第二首弹「未选择同一首曲目」 | 你在第二首改了歌或难度（这是设计行为） |
