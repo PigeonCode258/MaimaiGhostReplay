@@ -1,0 +1,104 @@
+<!--
+=============================================================================
+ ExampleMod.csproj —— 现代构建方式 (需要 .NET SDK 6/7/8)
+
+ ⚠️ 未在本机验证: 当前机器没有安装 dotnet SDK。
+    已验证可用的是零安装方案:  ..\build.ps1  (用系统自带 csc.exe)
+
+ 用法:
+   dotnet build                                     # 用默认游戏路径
+   dotnet build -p:GameRoot="D:\maimaiHDD\SDEZ170\Package"
+   dotnet build -p:GameRoot="..." -t:Deploy         # 编译后复制进 Mods\
+
+ 设计说明:
+   * 直接引用游戏自带的 MelonLoader.dll / 0Harmony.dll,
+     刻意不用 NuGet 的 Lib.Harmony —— 游戏内置的是 0Harmony 2.10.2.0,
+     用 NuGet 版本会造成程序集版本不匹配, 加载时崩溃。
+=============================================================================
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>MaimaiGhostReplay</AssemblyName>
+    <RootNamespace>MaimaiGhostReplay</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+
+    <!-- 游戏 Package 目录; 可用 -p:GameRoot=... 覆盖 -->
+    <GameRoot Condition="'$(GameRoot)' == ''">$(MSBuildThisFileDirectory)..\SDEZ170\Package</GameRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+  </ItemGroup>
+
+  <!-- 目标框架参考程序集: 没有装 Visual Studio 也能编译 net472 -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- 游戏本体 + Mod 加载器 (Private=false: 不要把游戏 dll 拷进输出目录) -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AMDaemon.NET">
+      <HintPath>$(GameRoot)\Sinmai_Data\Managed\AMDaemon.NET.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <Reference Include="MelonLoader">
+      <HintPath>$(GameRoot)\MelonLoader\net35\MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(GameRoot)\MelonLoader\net35\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- dotnet build -t:Deploy -->
+  <Target Name="Deploy" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
+    <MakeDir Directories="$(GameRoot)\Mods" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameRoot)\Mods" />
+    <Message Importance="high" Text="已部署: $(GameRoot)\Mods\$(AssemblyName).dll" />
+  </Target>
+
+</Project>

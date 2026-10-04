@@ -1,0 +1,79 @@
+# 实现说明与设计权衡
+
+> 本文由项目原始文档拆分而来，记录**需求实现对照、已知限制与设计权衡、Stage 5 完成情况**。
+> 各版本为什么这么改（根因分析）见 [../CHANGELOG.md](../CHANGELOG.md)。
+> 补丁点与游戏 API 的通用地图见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+
+## 需求实现对照
+
+
+| # | 需求 | 实现方式 | 状态 |
+|---|---|---|---|
+| 1 | 长按 1/2/7/8 弹同款警告框 | 补丁 `MenuSelectSequence.Update()` + 复用 `WindowMessageID.TrackSkip3Second`(137) 弹窗，Prefx `WindowMessageIDEnum.GetName()` 替换正文 | ✅ |
+| 2 | 消耗 2 track（长曲 4），不足则拒绝 | 按你的决策 **只校验不预扣**：`剩余 = GetMaxTrackCount() - MusicTrackNumber + 1`，普通曲需 ≥2、长曲需 ≥4，不足弹提示并拒绝 | ✅ |
+| 3 | 记录判定时间/结果/hold 按下松手/slide 划动路径 | `GameScoreList.SetResult` 拿到**权威结果+时刻**；`JudgeHoldHead`/`HoldOn` 拿 hold 头判与松手；`SlideRoot.CheckSlideTouch(index, In)` 拿划到第几个箭头 | ✅ |
+| 4 | 第二首自动同曲同难度；不一致则归还 track 并退出 | 游戏自带恢复光标；补丁 `MusicSelectProcess.OnGameStart()` 做「以第二首开始为准」的校验。**决策 B 下没有预扣，所以「归还」是空操作**，只退出模式并提示 | ✅ |
+| 5 | 第二首用 autoplay 还原 + 允许玩家操作，结算后退出 | **没有用游戏自带 AutoPlay**（它会把玩家输入整个短路掉）；改为逐 note 注入录制判定，游戏自己走 `EndNote()` 计分。结算后由 `GameProcess.OnRelease()` 退出 | ✅ |
+| 6 | 玩家操作覆盖录制（取并集） | 架构自带：note 若仍是 `ETiming.End`（玩家没打到）才注入；玩家先打到就跳过 | ✅ |
+| 7 | 不改游戏源文件 / 先给中文方案 | 独立 Mod，零文件修改；方案已先行确认 | ✅ |
+
+---
+
+
+## 已知限制与设计决策
+
+
+### 1. Stage 4 还原的是「判定与成绩」，不是「note 的物理动画」
+逐 note 注入的是判定结果与时刻，所以**分数、达成率、combo、判定统计都会忠实复现**，
+但 slide 的箭头滚动动画、hold 的持续发光不会跟着录制的轨迹走。
+这正是 Stage 5 要补的（见下）。
+
+### 2. 「取并集」的实际语义 = 玩家先判则玩家优先
+- 玩家在录制时刻**之前**打中这个 note → 跳过注入，**完全按玩家自己的判定算**（可好可坏）。
+- 玩家没打到 → 注入录制判定。
+
+这样你需求里举的例子都成立：接住了原来没接住的 hold、把 great 打成 critical perfect、slide 提前划完 —— 都会保留玩家的好成绩。
+
+**但反过来也成立**：如果你第二首某个 note 打得比第一首差，那个 note 会按你现在这个较差的结果算。
+如果你要的是「严格取更好的那个」，说一声，我改（需要在 note 结束后回头改写成绩，会多一层复杂度）。
+
+### 3. hold / touchhold 的总判用了覆盖
+hold 的最终判定在游戏里是 `EndNote()` 里由 `JudgeTotalResult()` 现算的，
+所以我们对「玩家没接住」的 hold 直接覆盖录制终态；玩家自己接住了的则交给游戏自己算。
+
+### 4. 只支持单人 1P
+2P 在场时手势不生效（按你的决策）。
+
+### 5. 这些模式下手势不生效
+段位（Course）、Freedom、活动（Event）—— 它们的 track 语义与普通模式不同。`n`n**宴会场（Utage）自 v0.4.0 起已支持**，只有「双人宴会谱」（`utagePlayStyle == DoublePlayerScore`）会被拒绝 —— 单人游玩时游戏会自动把这类谱面换成别的 utage 曲，那样第二首就配不上对了。
+
+### 6. 录制数据只存内存
+第二首结算即丢弃，不落盘、不碰 `UserData`。
+
+---
+
+
+## 原始 Stage 5 计划（已完成，留档）
+
+> 以下是当初拟定的 Stage 5 计划，现已全部完成或明确放弃，完成情况见本页最后一节。
+
+
+| 项 | 做法 | 价值 |
+|---|---|---|
+| hold / touchhold 保持态回放 | Prefix `InputManager.GetButtonPush` / `GetTouchPanelAreaPush`，在录制的按压区间内返回 true（只在玩家没按的时候），让游戏自己的 hold 体判逻辑跑起来 | 连 hold 的「按住多久」也还原，游戏内表现更自然 |
+| slide 划动轨迹回放 | 用录制的 `CheckSlideTouch` 路径驱动 `_hitIndex`，让箭头跟着滚 | slide 视觉与判定都对上 |
+| 游戏内调试浮层 | 左上角显示当前阶段 + 已录 note 数 | 不用翻日志 |
+
+这两个都属于「锦上添花」，且都改动热路径，所以单独放一阶段，做成可开关。
+
+---
+
+
+## Stage 5 完成情况
+
+| 项 | 状态 |
+|---|---|
+| slide 滑动动画（星星滑行 + 箭头逐个熄灭） | ✅ v0.5.0 |
+| hold / touchhold 判定与分数的回放 | ✅ v0.5.1 |
+| hold / touchhold 保持态视觉 | ✅ v0.6.0 |
+| 玩家抢划 slide 覆盖录制判定 | ❌ 未做（有视觉回退风险，见 v0.5.0 权衡） |

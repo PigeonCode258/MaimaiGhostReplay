@@ -1,0 +1,23 @@
+# ============================================================================
+#  换行符与二进制处理
+# ============================================================================
+
+# 默认：仓库内存 LF，检出时按平台自动转换
+* text=auto
+
+# PowerShell 脚本用 CRLF（Windows 上更稳妥）
+*.ps1 text eol=crlf
+
+# 源码与文档统一 LF
+*.cs    text eol=lf
+*.md    text eol=lf
+*.csproj text eol=lf
+*.gitignore text eol=lf
+
+# 二进制（正常情况下这些不进仓库，写在这里是双保险）
+*.dll binary
+*.pdb binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.ico binary

@@ -1,0 +1,36 @@
+# ============================================================================
+#  MaimaiGhostReplay —— 只提交源码，不提交任何游戏内容或构建产物
+# ============================================================================
+
+# ---- 构建产物 ----
+/build/
+*.dll
+*.pdb
+*.log
+
+# ---- 游戏本体与反编译源码（绝不入库）----
+# 正常情况下仓库根目录就不该出现这些目录（repo 建在 maimai-mod-dev 里），
+# 这里是第二道保险，防止有人在仓库根目录解压游戏。
+/SDEZ170/
+/SDEZ1.70-Csharp/
+Package/
+Sinmai_Data/
+MelonLoader/
+Mods/
+UserData/
+LocalAssets/
+appdata/
+
+# ---- 构建时从游戏目录读取的本地引用 ----
+/refs/
+
+# ---- 编辑器 / 系统 ----
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+Thumbs.db
+Desktop.ini
+.DS_Store
