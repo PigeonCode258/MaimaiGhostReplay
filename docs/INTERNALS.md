@@ -11,7 +11,7 @@
 |---|---|---|---|
 | 1 | 长按 1/2/7/8 弹同款警告框 | 补丁 `MenuSelectSequence.Update()` + 复用 `WindowMessageID.TrackSkip3Second`(137) 弹窗，Prefx `WindowMessageIDEnum.GetName()` 替换正文 | ✅ |
 | 2 | 消耗 2 track（长曲 4），不足则拒绝 | 按你的决策 **只校验不预扣**：`剩余 = GetMaxTrackCount() - MusicTrackNumber + 1`，普通曲需 ≥2、长曲需 ≥4，不足弹提示并拒绝 | ✅ |
-| 3 | 记录判定时间/结果/hold 按下松手/slide 划动路径 | `GameScoreList.SetResult` 拿到**权威结果+时刻**；`JudgeHoldHead`/`HoldOn` 拿 hold 头判与松手；`SlideRoot.CheckSlideTouch(index, In)` 拿划到第几个箭头 | ✅ |
+| 3 | 记录判定时间/结果/hold 按下松手/slide 划动路径 | 6 个 `SetPlayResult()` 拿到**权威结果+时刻**（v0.2.0 起；原先挂的 `GameScoreList.SetResult` 会被结算补判污染）；`JudgeHoldHead`/`HoldOn` 拿 hold 头判与松手；`SlideRoot.CheckSlideTouch(index, In)` 拿划到第几个箭头 | ✅ |
 | 4 | 第二首自动同曲同难度；不一致则归还 track 并退出 | 游戏自带恢复光标；补丁 `MusicSelectProcess.OnGameStart()` 做「以第二首开始为准」的校验。**决策 B 下没有预扣，所以「归还」是空操作**，只退出模式并提示 | ✅ |
 | 5 | 第二首用 autoplay 还原 + 允许玩家操作，结算后退出 | **没有用游戏自带 AutoPlay**（它会把玩家输入整个短路掉）；改为逐 note 注入录制判定，游戏自己走 `EndNote()` 计分。结算后由 `GameProcess.OnRelease()` 退出 | ✅ |
 | 6 | 玩家操作覆盖录制（取并集） | 架构自带：note 若仍是 `ETiming.End`（玩家没打到）才注入；玩家先打到就跳过 | ✅ |
@@ -23,10 +23,12 @@
 ## 已知限制与设计决策
 
 
-### 1. Stage 4 还原的是「判定与成绩」，不是「note 的物理动画」
-逐 note 注入的是判定结果与时刻，所以**分数、达成率、combo、判定统计都会忠实复现**，
-但 slide 的箭头滚动动画、hold 的持续发光不会跟着录制的轨迹走。
-这正是 Stage 5 要补的（见下）。
+### 1. 判定与成绩完全还原；note 动画由 Stage 5 补齐
+逐 note 注入的是判定结果与时刻，所以**分数、达成率、combo、判定统计都会忠实复现**。
+note 的物理动画也已补上：slide 的星星滑动 + 箭头逐个熄灭（v0.5.0）、hold 的保持态发光（v0.6.0）。
+
+唯一仍未还原的是**录制的 `SlidePath`** —— 它目前只写进日志（`DumpRecord`），
+slide 的滑动走的是游戏自身的时间轴，所以星星是按谱面时间滑，而不是按你上一局的手指轨迹滑。
 
 ### 2. 「取并集」的实际语义 = 玩家先判则玩家优先
 - 玩家在录制时刻**之前**打中这个 note → 跳过注入，**完全按玩家自己的判定算**（可好可坏）。
@@ -45,7 +47,9 @@ hold 的最终判定在游戏里是 `EndNote()` 里由 `JudgeTotalResult()` 现�
 2P 在场时手势不生效（按你的决策）。
 
 ### 5. 这些模式下手势不生效
-段位（Course）、Freedom、活动（Event）—— 它们的 track 语义与普通模式不同。`n`n**宴会场（Utage）自 v0.4.0 起已支持**，只有「双人宴会谱」（`utagePlayStyle == DoublePlayerScore`）会被拒绝 —— 单人游玩时游戏会自动把这类谱面换成别的 utage 曲，那样第二首就配不上对了。
+段位（Course）、Freedom、活动（Event）—— 它们的 track 语义与普通模式不同。
+
+**宴会场（Utage）自 v0.4.0 起已支持**，只有「双人宴会谱」（`utagePlayStyle == DoublePlayerScore`）会被拒绝 —— 单人游玩时游戏会自动把这类谱面换成别的 utage 曲，那样第二首就配不上对了。
 
 ### 6. 录制数据只存内存
 第二首结算即丢弃，不落盘、不碰 `UserData`。
