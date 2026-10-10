@@ -1,6 +1,11 @@
 ﻿// ============================================================================
 //  Recorder.cs —— 录制层  (v0.2.0)
 //
+//  v0.7.1：OnNoteJudged() 里补记 hold 的松手时刻。
+//    玩家按到 note 结束时游戏就不再调 HoldOn 了（见 ReplayInjector 头部的说明），
+//    于是录不到 true->false 边沿、HasHoldEnd 一直是 false，
+//    回放的「按住区间」缺少右端点 —— 松手边沿永不触发。
+//
 //  v0.1.0 的重大 bug（已修）：曾经挂在 GameScoreList.SetResult 上录制。
 //  但 SetResult 不止实战判定会调，结算补判也会调：
 //    FinishPlay()              GameScoreList.cs:1788  给未判 note 补 TooLate
@@ -50,6 +55,23 @@ namespace MaimaiGhostReplay
             r.Timing = (int)timing;
             r.JudgeMsec = msec;
             r.DiffMsec = diffMsec;
+
+            // v0.7.1：hold 的松手时刻补齐。
+            // 玩家「按到 note 结束」（hold 的正确打法）时，游戏进入尾判窗口后
+            // 就不再调 HoldOn 了（HoldNote.cs:169-172 的
+            // IsNoteCheckTimeHoldTailIgnoreJudgeWait 让 :263 那个 if 不再成立，
+            // 于是 :312 的 HoldOn(LastHoldState) 也不再执行），
+            // 我们因此看不到 true->false 边沿，HasHoldEnd 永远为 false ——
+            // 回放的「按住区间」[HeadMsec, HoldEndMsec] 就没有右端点。
+            // 这里在 hold 结算时补记：_holding 只由 hold 的 HoldOn 填充，
+            // 所以这个判断天然只对 hold 生效，不需要额外分辨 note 类型。
+            bool stillHolding;
+            if (_holding.TryGetValue(noteIndex, out stillHolding) && stillHolding)
+            {
+                _holding[noteIndex] = false;
+                r.HasHoldEnd = true;
+                r.HoldEndMsec = msec;
+            }
         }
 
         // --------------------------------------------------------------------

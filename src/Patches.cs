@@ -66,6 +66,7 @@ namespace MaimaiGhostReplay
             typeof(P_GameProcess_OnRelease),
             typeof(P_MusicSelectProcess_OnGameStart),
             typeof(P_MusicSelectProcess_OnStart),
+            typeof(P_MusicSelectSequence_OnStartSequence),
             typeof(P_DifficultySelectSequence_OnStartSequence),
             typeof(P_MusicSelectMonitor_OnStartDifficultySelect),
             typeof(P_UtageDifficultySelectSequence_OnStartSequence),
@@ -461,6 +462,21 @@ namespace MaimaiGhostReplay
             {
                 try { GhostFlow.OnMusicSelectStart(__instance); }
                 catch (Exception e) { GhostReplayMod.LogWarn("OnMusicSelectStart 异常: " + e); }
+            }
+        }
+
+        // 第二首曲目位置的「消费点复检」（v0.7.2）
+        // OnStart 摆完之后，游戏自己那套以 Extend / CategoryIndex 为准的恢复逻辑
+        // 还可能把位置带回旧处；游客模式下分类列表又与登录玩家不同，容易错位。
+        // 所以在玩家真正看到音乐列表的那一刻（MusicSelectSequence 开始）再确认一次。
+        // GhostFlow 侧做了「一次性」保护，玩家主动改选时不会被拽回。
+        [HarmonyPatch(typeof(MusicSelectSequence), "OnStartSequence")]
+        internal static class P_MusicSelectSequence_OnStartSequence
+        {
+            private static void Postfix()
+            {
+                try { GhostFlow.OnMusicSelectSequenceStart(); }
+                catch (Exception e) { GhostReplayMod.LogWarn("OnMusicSelectSequenceStart 异常: " + e); }
             }
         }
 

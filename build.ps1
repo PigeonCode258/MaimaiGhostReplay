@@ -11,7 +11,7 @@
  Usage:
    .\build.ps1
    .\build.ps1 -Deploy
-   .\build.ps1 -GameRoot "D:\maimaiHDD\SDEZ170\Package" -Deploy
+   .\build.ps1 -GameRoot "X:\path\to\SDEZ170\Package" -Deploy
 =============================================================================
 #>
 [CmdletBinding()]

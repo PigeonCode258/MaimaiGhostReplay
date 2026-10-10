@@ -1,13 +1,13 @@
 <!--
 =============================================================================
- ExampleMod.csproj —— 现代构建方式 (需要 .NET SDK 6/7/8)
+ MaimaiGhostReplay.csproj -- 现代构建方式 (需要 .NET SDK 6/7/8)
 
- ⚠️ 未在本机验证: 当前机器没有安装 dotnet SDK。
+ ⚠️ 未验证: 验证环境没有安装 dotnet SDK。
     已验证可用的是零安装方案:  ..\build.ps1  (用系统自带 csc.exe)
 
  用法:
    dotnet build                                     # 用默认游戏路径
-   dotnet build -p:GameRoot="D:\maimaiHDD\SDEZ170\Package"
+   dotnet build -p:GameRoot="X:\path\to\SDEZ170\Package"
    dotnet build -p:GameRoot="..." -t:Deploy         # 编译后复制进 Mods\
 
  设计说明:

@@ -6,6 +6,8 @@
 //        只有 SequenceBase 的 protected 字段和 ProcessDataContainer 必须走反射。
 // ============================================================================
 using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Reflection;
 using DB;
 using MAI2.Util;
@@ -116,6 +118,7 @@ namespace MaimaiGhostReplay
             GhostState.BaseIsLong = isLong;
             GhostState.Recording = null;
             GhostState.Record = null;
+            GhostState.SecondSelectReasserted = false;
 
             GhostReplayMod.Log("记录模式开启: music=" + musicId + " diff=" + difficulty +
                 " (来源 " + DifficultySourceText(pp, player) + ") long=" + isLong +
@@ -235,6 +238,12 @@ namespace MaimaiGhostReplay
                     " 条 / 玩家自己按 " + ReplayInjector.HoldPlayerTook +
                     " 条 / 录制无头判 " + ReplayInjector.HoldNoHead + " 条");
                 GhostReplayMod.Log("  回放 hold 保持态: 补出 " + ReplayInjector.HoldBodyFaked + " 条");
+                GhostReplayMod.Log("  回放 hold 粒子: 起 " + ReplayInjector.HoldFxStart +
+                    " 条 / 止 " + ReplayInjector.HoldFxStop + " 条 / 重放 " + ReplayInjector.HoldFxReplay +
+                    " 次 / 结算 " + ReplayInjector.HoldFxTail + " 条");
+                GhostReplayMod.Log("  回放打击特效: " + ReplayInjector.HitFxCount +
+                    " 次（tap=" + ReplayInjector.HitFxTap + " / ex=" + ReplayInjector.HitFxEx +
+                    " / break=" + ReplayInjector.HitFxBreak + " / touch=" + ReplayInjector.HitFxTouch + "）");
                 GhostState.StopMode();
             }
         }
@@ -244,10 +253,15 @@ namespace MaimaiGhostReplay
         /// 补丁点：Process.MusicSelectProcess.OnStart()
         /// v0.2.0 新增：第二首时强制把光标预选到「同一首歌 + 同一难度」。
         ///
-        /// 为什么需要自己做：游戏自己在 OnStart 里也会尝试恢复（MusicSelectProcess.cs:1270-1311），
-        /// 但那段是按排序方式分支的，默认「曲风」排序走 SetGenreSortIndex，
-        /// 只设分类、不按曲目定位。这里直接调游戏自己的 SetSortIndexToMaiList 强制定位，
+        /// 为什么需要自己做：游戏自己在 OnStart 里也会尝试恢复
+        /// （MusicSelectProcess.cs:1100-1136 从 userData.Extend 还原，
+        ///  :1270-1271 再 SetCategoryIndex + CurrentMusicSelect 摆光标），
+        /// 但那套是以「游戏自己的存档状态」为准的，而从第一首结束到这里的途中
+        /// 我们并没有更新那份状态。这里直接调游戏自己的 SetSortIndexToMaiList 强制定位，
         /// 再照搬 SetGhostJumpIndex()(:4193) 的做法调 SetDeployList 把光标推到画面上。
+        ///
+        /// v0.7.2：抽成幂等的 RepositionToRecorded()，并新增「消费点复检」
+        /// （OnMusicSelectSequenceStart）。原因见那两处的注释。
         /// </summary>
         public static void OnMusicSelectStart(MusicSelectProcess msp)
         {
@@ -255,79 +269,258 @@ namespace MaimaiGhostReplay
             if (GhostState.Phase != GhostPhase.AwaitingSecond) return;
             if (GhostState.BaseMusicId < 0) return;
 
+            RepositionToRecorded(msp, "预选");
+        }
+
+        /// <summary>
+        /// v0.7.2：补丁点：Process.SubSequence.MusicSelectSequence.OnStartSequence() 的 Postfix
+        /// —— 「消费点复检」。
+        ///
+        /// v0.3.0 修难度时得到的教训：摆在产生点（OnStart）会被中途的东西冲掉，要摆在消费点。
+        /// 曲目位置同理：OnStart 摆完之后，游戏自己那套以 GameManager.CategoryIndex/MusicIndex
+        /// 与 userData.Extend.* 为准的恢复逻辑还可能把位置带回旧处；
+        /// 而游客模式下的分类列表本来就和登录玩家不同 ——
+        /// _combineFavouriteDataList / _combineMapTaskDataList / _combineChallengeDataList /
+        /// _combineCircleDataList 在 NotesListManager 里对游客一律为空
+        /// （IsFavouriteMusic / IsMapBonus / IsCircleTask 第一句就是 !IsGuest，
+        ///  见 NotesListManager.cs:558 / 590 / 613 / 626 / 643），
+        /// 而 SetCategoryIndex() 是拿共享的 CurrentCategorySelect 去索引「按玩家构建」的
+        /// _genreSelectDataList，两边长度一旦不同就会错位。
+        /// 所以在玩家真正看到列表的那一刻再确认一次。
+        ///
+        /// 必须是一次性的：OnStartSequence() 在「按 5 退回 Genre 再进 Music」时也会再跑，
+        /// 不加开关就会把想改选的玩家反复拽回录制曲目，违背需求 4。
+        /// </summary>
+        public static void OnMusicSelectSequenceStart()
+        {
+            if (GhostState.Phase != GhostPhase.AwaitingSecond) return;
+            if (GhostState.SecondSelectReasserted) return;
+            if (GhostState.BaseMusicId < 0) return;
+
+            MusicSelectProcess msp = GameRefs.MusicSelect;
+            if (msp == null) return;
+            GhostState.SecondSelectReasserted = true;
+
+            int curId, curDiff;
+            ReadCurrentHighlight(msp, out curId, out curDiff);
+            bool moved = RepositionToRecorded(msp, "复检");
+            GhostReplayMod.Log("第二首复检: 当前=" + curId + "/" + curDiff +
+                " | 期望=" + GhostState.BaseMusicId + "/" + GhostState.BaseDifficulty +
+                (moved ? " → 已纠正" : " → 一致"));
+        }
+
+        /// <summary>
+        /// v0.7.2：把光标定位到「录制曲目 + 录制难度」。
+        /// **幂等**：当前位置已经对就什么都不做、返回 false（避免视觉抖动，也不跟玩家抢光标）。
+        /// 定位优先级：游戏自己的搜索器 → 宴会场兜底 → 自写扫描。
+        /// </summary>
+        private static bool RepositionToRecorded(MusicSelectProcess msp, string tag)
+        {
             int musicId = GhostState.BaseMusicId;
             int difficulty = GhostState.BaseDifficulty;
 
-            bool located = false;
-            try
-            {
-                MethodInfo mi = typeof(MusicSelectProcess).GetMethod(
-                    "SetSortIndexToMaiList",
-                    BindingFlags.Instance | BindingFlags.NonPublic,
-                    null,
-                    new System.Type[] { typeof(int), typeof(int), typeof(bool), typeof(bool) },
-                    null);
-                if (mi != null)
-                {
-                    object r = mi.Invoke(msp, new object[] { musicId, difficulty, true, true });
-                    if (r is bool) located = (bool)r;
-                }
-                else
-                {
-                    GhostReplayMod.LogWarn("找不到 SetSortIndexToMaiList，无法强制预选");
-                }
-            }
-            catch (Exception e)
-            {
-                GhostReplayMod.LogWarn("SetSortIndexToMaiList 调用失败: " + e.Message);
-            }
+            string source = "已在目标位置";
+            bool moved = false;
 
-            // v0.4.0：宴会场曲目属于 extra 分类，而 SetSortIndexToMaiList 只搜索
-            // IsMaiList 的分类，找不到 utage；这时改用游戏自己的 SetSortIndexToExtraGenre。
-            if (!located && msp.IsUtageMusicFolder())
+            int curId, curDiff;
+            if (!(ReadCurrentHighlight(msp, out curId, out curDiff) &&
+                  curId == musicId && curDiff == difficulty))
             {
-                located = CallSetSortIndexToExtraGenre(msp, musicId);
-            }
+                moved = true;
+                source = "未找到";
 
-            // 难度：两个都是 public 属性，游戏自己也是就地改数组元素
-            try
-            {
-                int[] dsi = msp.DifficultySelectIndex;
-                if (dsi != null)
+                // ① 游戏自己的搜索器
+                bool located = false;
+                try
                 {
-                    for (int i = 0; i < dsi.Length; i++) dsi[i] = difficulty;
-                }
-                MusicDifficultyID[] cd = msp.CurrentDifficulty;
-                if (cd != null)
-                {
-                    for (int i = 0; i < cd.Length; i++) cd[i] = (MusicDifficultyID)difficulty;
-                }
-            }
-            catch (Exception e)
-            {
-                GhostReplayMod.LogWarn("设置难度失败: " + e.Message);
-            }
-
-            // 把光标推到画面上 —— 与游戏自己的 SetGhostJumpIndex() 做法一致
-            try
-            {
-                Monitor.MusicSelectMonitor[] ma = msp.MonitorArray;
-                if (ma != null)
-                {
-                    for (int i = 0; i < ma.Length; i++)
+                    MethodInfo mi = typeof(MusicSelectProcess).GetMethod(
+                        "SetSortIndexToMaiList",
+                        BindingFlags.Instance | BindingFlags.NonPublic,
+                        null,
+                        new System.Type[] { typeof(int), typeof(int), typeof(bool), typeof(bool) },
+                        null);
+                    if (mi != null)
                     {
-                        if (ma[i] == null) continue;
-                        ma[i].SetDeployList(false, false);
+                        object r = mi.Invoke(msp, new object[] { musicId, difficulty, true, true });
+                        if (r is bool) located = (bool)r;
+                        if (located) source = "游戏搜索";
+                    }
+                    else
+                    {
+                        GhostReplayMod.LogWarn("找不到 SetSortIndexToMaiList，改用自写扫描");
+                    }
+                }
+                catch (Exception e)
+                {
+                    GhostReplayMod.LogWarn("SetSortIndexToMaiList 调用失败: " + e.Message);
+                }
+
+                // ② v0.4.0：宴会场曲目属于 extra 分类，SetSortIndexToMaiList 只搜索
+                //    IsMaiList 的分类，够不着 utage；改用游戏自己的 SetSortIndexToExtraGenre。
+                if (!located && msp.IsUtageMusicFolder())
+                {
+                    if (CallSetSortIndexToExtraGenre(msp, musicId))
+                    {
+                        located = true;
+                        source = "宴会场兜底";
+                    }
+                }
+
+                // ③ v0.7.2 自写扫描兜底：游戏搜索失败时（例如游客模式下分类列表不同）
+                //    自己遍历一遍。只在失败路径启用，成功路径的落点仍完全交给游戏。
+                if (!located && ScanForMusic(msp, musicId))
+                {
+                    located = true;
+                    source = "自写扫描";
+                }
+
+                // 难度：两个都是 public 属性，游戏自己也是就地改数组元素
+                try
+                {
+                    int[] dsi = msp.DifficultySelectIndex;
+                    if (dsi != null)
+                    {
+                        for (int i = 0; i < dsi.Length; i++) dsi[i] = difficulty;
+                    }
+                    MusicDifficultyID[] cd = msp.CurrentDifficulty;
+                    if (cd != null)
+                    {
+                        for (int i = 0; i < cd.Length; i++) cd[i] = (MusicDifficultyID)difficulty;
+                    }
+                }
+                catch (Exception e)
+                {
+                    GhostReplayMod.LogWarn("设置难度失败: " + e.Message);
+                }
+
+                // 把光标推到画面上 —— 与游戏自己的 SetGhostJumpIndex() 做法一致
+                try
+                {
+                    Monitor.MusicSelectMonitor[] ma = msp.MonitorArray;
+                    if (ma != null)
+                    {
+                        for (int i = 0; i < ma.Length; i++)
+                        {
+                            if (ma[i] == null) continue;
+                            ma[i].SetDeployList(false, false);
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    GhostReplayMod.LogWarn("SetDeployList 失败: " + e.Message);
+                }
+            }
+
+            // 读回自证：两种路径打同形的日志，便于对照
+            int readId, readDiff;
+            ReadCurrentHighlight(msp, out readId, out readDiff);
+            GhostReplayMod.Log("第二首" + tag + ": music=" + musicId + " diff=" + difficulty +
+                " | guest=" + IsGuestPlayer() + " | 来源=" + source +
+                " | 落点=" + LandedCategoryText(msp) +
+                " | 读回=" + readId + "/" + readDiff +
+                " | 应用=" + (moved ? "是" : "否"));
+            if (readId != musicId)
+            {
+                GhostReplayMod.LogWarn("第二首" + tag + "落点与预期不一致: 期望 music=" + musicId +
+                    "，实际读回 " + readId + "（分类/索引可能错位）");
+            }
+            return moved;
+        }
+
+        /// <summary>
+        /// v0.7.2：读当前高亮的曲目 ID 与难度。全部走公开成员，签名由编译器检查。
+        /// 越界或异常返回 false。
+        /// </summary>
+        private static bool ReadCurrentHighlight(MusicSelectProcess msp, out int musicId, out int difficulty)
+        {
+            musicId = -1;
+            difficulty = -1;
+            if (msp == null) return false;
+            try
+            {
+                List<ReadOnlyCollection<MusicSelectProcess.CombineMusicSelectData>> list =
+                    msp.CombineMusicDataList;
+                if (list == null) return false;
+                int c = msp.CurrentCategorySelect;
+                if (c < 0 || c >= list.Count) return false;
+                ReadOnlyCollection<MusicSelectProcess.CombineMusicSelectData> cat = list[c];
+                if (cat == null) return false;
+                int m = msp.CurrentMusicSelect;
+                if (m < 0 || m >= cat.Count) return false;
+                MusicSelectProcess.CombineMusicSelectData item = cat[m];
+                if (item == null) return false;
+
+                MAI2System.ConstParameter.ScoreKind kind = msp.ScoreType;
+                musicId = item.GetID(kind);
+                if (item.musicSelectData != null)
+                {
+                    MusicSelectProcess.MusicSelectData msd = item.musicSelectData[(int)kind];
+                    if (msd != null) difficulty = msd.Difficulty;
+                }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>
+        /// v0.7.2：游戏搜索失败时自己扫一遍所有分类找曲目，
+        /// 与游戏一致地同时试 STD/DX 别名（MusicSelectProcess.cs:4043 的做法）。
+        /// 命中就写 CurrentCategorySelect / CurrentMusicSelect。
+        /// </summary>
+        private static bool ScanForMusic(MusicSelectProcess msp, int musicId)
+        {
+            int alias = (musicId < 10000) ? (musicId + 10000) : (musicId - 10000);
+            try
+            {
+                List<ReadOnlyCollection<MusicSelectProcess.CombineMusicSelectData>> list =
+                    msp.CombineMusicDataList;
+                if (list == null) return false;
+                MAI2System.ConstParameter.ScoreKind kind = msp.ScoreType;
+                for (int c = 0; c < list.Count; c++)
+                {
+                    ReadOnlyCollection<MusicSelectProcess.CombineMusicSelectData> cat = list[c];
+                    if (cat == null) continue;
+                    for (int m = 0; m < cat.Count; m++)
+                    {
+                        MusicSelectProcess.CombineMusicSelectData item = cat[m];
+                        if (item == null) continue;
+                        int id = item.GetID(kind);
+                        if (id == musicId || id == alias)
+                        {
+                            msp.CurrentCategorySelect = c;
+                            msp.CurrentMusicSelect = m;
+                            return true;
+                        }
                     }
                 }
             }
             catch (Exception e)
             {
-                GhostReplayMod.LogWarn("SetDeployList 失败: " + e.Message);
+                GhostReplayMod.LogWarn("自写扫描失败: " + e.Message);
             }
+            return false;
+        }
 
-            GhostReplayMod.Log("第二首预选: music=" + musicId + " diff=" + difficulty +
-                (located ? " 定位成功" : " 定位失败（保持游戏默认）"));
+        /// <summary>v0.7.2：落点分类名 + 下标，日志用。</summary>
+        private static string LandedCategoryText(MusicSelectProcess msp)
+        {
+            try
+            {
+                string name = null;
+                List<string> names = msp.CategoryNameList;
+                int c = msp.CurrentCategorySelect;
+                if (names != null && c >= 0 && c < names.Count) name = names[c];
+                return "\"" + (name == null ? "?" : name) + "\"#" + c + "/" + msp.CurrentMusicSelect;
+            }
+            catch (Exception) { return "?"; }
+        }
+
+        /// <summary>v0.7.2：1P 是否游客（日志用）。</summary>
+        private static bool IsGuestPlayer()
+        {
+            try { return Singleton<UserDataManager>.Instance.GetUserData(0L).IsGuest(); }
+            catch (Exception) { return false; }
         }
         // ---------------------------------------------------------------- 入口 6/7（v0.3.0）
         /// <summary>

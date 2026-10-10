@@ -5,6 +5,9 @@
 
 | 版本 | 主题 |
 |---|---|
+| v0.7.2.1 | 移除了一些者 |
+| v0.7.1 | hold / touchhold 按住的持续粒子在回放中显示 |
+| v0.7.0 | 回放判定补上打击特效 |
 | v0.6.0 | hold 回放时显示「被按住」的模样（Stage 5 完成） |
 | v0.5.1 | 修复 hold 从来没被回放过 |
 | v0.5.0 | slide 的星星真正会滑动（Stage 5 第一项） |
@@ -343,5 +346,196 @@ Postfix 里按录制的按住区间 `[HeadMsec, HoldEndMsec]`：
 
 - 玩家在回放时**抢划 slide** 覆盖录制判定的能力（见 v0.5.0 的权衡一节）
 - 「取并集」仍是「玩家先判则玩家优先」
+
+---
+
+## v0.7.0 —— 回放判定补上打击特效
+
+#### 症状
+
+回放（第二首）里 note 被判定命中时**看不到打击特效**，但**判定文字是正常显示的**。
+
+#### 根因：每根轨道只有 1 个 `TouchEffect`，被「note 判定」和「玩家按键」共用
+
+判定文字与打击粒子是 `EndNote()` 里紧挨着的两行：
+
+```csharp
+// Monitor\NoteBase.cs
+JudgeGradeObject.Initialize(GetJudgeResult(), JudgeTimingDiffMsec, JudgeType);   // :348 判定文字
+if (IsExNote) JudgeEffectObject.InitializeEx(GetJudgeResult());                  // :351 打击粒子
+else          JudgeEffectObject.Initialize(GetJudgeResult());                    // :355
+```
+
+判定文字能出来，说明 `EndNote()` 确实执行了、粒子也确实被请求了 —— **问题不是「没调用」，而是「调用了但被别的东西吃掉了」**。
+
+吃掉它的是**共享实例的争用**：
+
+```csharp
+// Monitor\Game\GameCtrl.cs:996-999  每根轨道建 1 个 TouchEffect（挂在 launcher 的 NoteEnd 下）
+TouchEffect touchEffect = Object.Instantiate(GameNotePrefabContainer.TouchEffect, gameObject6.transform);
+touchEffect.SetUpParticle(monitorIndex);
+_touchEffectObjectList.Add(touchEffect);
+
+// Monitor\Game\GameCtrl.cs:1480    同一个实例交给 note
+tapObject.SetJudgeObject(_judgeGradeObjectList[startButtonPos], _touchEffectObjectList[startButtonPos]);
+
+// Monitor\Game\GameCtrl.cs:604-609  玩家每按一次键，调的也是同一个实例
+if ((InputManager.InGameButtonDown(...) || InputManager.InGameTouchPanelAreaDown(...))
+    && userOption.TouchEffect != OptionToucheffectID.Off)
+{
+    _touchEffectObjectList[i].Initialize();      // 粒子槽 0 = CMN_Touch/FX_CMN_Touch
+}
+```
+
+而 `Monitor\TouchEffect.cs` 内部是**单状态机**：
+
+- `PlayParticles()` 播一个粒子槽时会把**其它所有槽关掉**（`:101-104`）——所以同时只能看见一个粒子；
+- `Initialize()`（无参）带守卫 `(_playingIndex == -1 || _playingIndex == 0) && _touchEffectFrame == 0`（`:121`）；
+- `Execute()` 在粒子停时把**整个 GameObject** 关掉（`:250-256`）。
+
+玩家在第二首里是一直在操作的，于是「按键那一发」和「回放判定那一发」互相抢占同一个对象，判定粒子基本看不到。
+
+这与 v0.3.0（判定音）、v0.5.0（slide 动画）、v0.6.0（hold 保持态）是**同一类坑**：凡游戏用「真实输入」驱动的视觉，回放都必须自己补。
+
+#### 修法：给幽灵判定一套自己的特效对象
+
+不再和游戏 / 玩家抢那个共享实例，而是每根轨道克隆一个**只有回放会用**的 `TouchEffect`：
+
+```csharp
+// ReplayInjector.GhostFx()
+UnityEngine.Transform parent = gameFx.transform.parent;   // 该轨道 launcher 的 NoteEnd
+fx = UnityEngine.Object.Instantiate<Monitor.TouchEffect>(GameNotePrefabContainer.TouchEffect, parent);
+fx.SetUpParticle(monitorId);   // 同一套粒子资源、同一 TapDesign / HoldDesign
+fx.StopAll();                  // 关键：SetUpParticle 会把 7 个槽全播一遍（GameCtrl.cs:412 也这么收尾）
+```
+
+父节点取游戏自己那个实例的 `transform.parent`，所以**位置与朝向天然正确**，和游戏特效同级同位。
+
+然后在 `InjectNoteBase()` 里按 note 家族调用游戏**自己的**入口（与 `EndNote()` 一一对应）：
+
+| note 家族 | 游戏 `EndNote()` 里的调用 | 粒子槽 |
+|---|---|---|
+| TapNote / StarNote / TouchNoteC（非 Ex） | `Initialize(ETiming)` | 1（`FX_GAM_Notes_Tap_*`） |
+| Ex note（`ExNote == true`） | `InitializeEx(ETiming)` | 4 |
+| BreakNote / BreakStarNote | `InitializeBreak(ETiming)` | 5 |
+| TouchNoteB 及其子类 | `InitializeCenter(ETiming)` | 6 |
+| HoldNote / BreakHoldNote / TouchHoldC | 头判 `InitializeHold`、尾判 `FinishHold` | 2 / 3 |
+| SlideRoot / SlideFan | 无 `TouchEffect`（走 `SlideJudge`） | — |
+
+**判定顺序是敏感的**：必须先判 `BreakNote`、再判 `TouchNoteB`，最后才看 `ExNote` —— 因为 `BreakNote.EndNote()` 只调 `InitializeBreak`、`TouchNoteB.EndNote()` 只调 `InitializeCenter`，两者都不看 `ExNote`。
+
+**hold 与 slide 本次不动**：slide 根本没有 `TouchEffect`（它走 `SlideJudge`）。
+hold 则**留到 v0.7.1** —— 这里当时写的「hold 的头判本来就不出爆发粒子」是**错的**：
+hold 出的是槽 2 的**持续**粒子（`FX_GAM_Notes_Hold_*`，按住期间一直在），
+生命周期比瞬时爆开长得多，需要单独一个实例，混在一起会被 tap 爆开顶掉。
+详见 v0.7.1。
+
+**miss 自动不出特效**：`TouchEffect.Initialize*` 内部对 `ConvertJudge(t) == Miss` 直接 `break`，而 `TooFast` / `TooLate` 经 `ConvertJudge` 都归为 `Miss`（`NoteJudge.cs:279-306`）——所以录制成 miss 的 note 不会凭空冒特效，不需要额外判断。
+
+调用方式：`Initialize` / `InitializeEx` / `InitializeBreak` / `InitializeCenter` / `SetUpParticle` / `StopAll` 全是 `public`，`GameNotePrefabContainer.TouchEffect` 是 public static 属性，`NoteBase.ExNote` / `MonitorId` 是 public 属性 → **全部直接调用，让编译器查签名，不用反射**。
+
+#### 附带变更
+
+- 新增日志 `回放打击特效: N 次（tap=a / ex=b / break=c / touch=d）`
+- 版本 `0.6.0` → `0.7.0`；**补丁数不变（36/36），反射查找不变（33/33）** —— 本次没有新增任何 Harmony 补丁，`Patches.cs` 未改动
+- 幽灵特效实例按「游戏那个共享 `TouchEffect` 的引用」缓存，**不随开局清理**（游戏的 `TouchEffect` 本身是开局建一次、跨局复用）
+- 已知小限制：实例跨局复用，因此中途改 `TapDesign` / `HoldDesign` 选项后特效颜色要到重开游戏才会更新
+
+---
+
+## v0.7.1 —— hold / touchhold 按住的持续粒子在回放中显示
+
+#### 症状
+
+回放里幽灵「按着」hold / touchhold 时，**按住期间那个持续显示的粒子看不到**（贴图按住态 v0.6.0 是好的）。
+
+#### 根因：两个独立问题叠加
+
+**(1) 录制侧 —— hold 的按住区间缺右端点。**
+游戏只在尾判窗口**之外**才调 `HoldOn`：
+
+```csharp
+// Monitor\HoldNote.cs
+protected virtual bool IsNoteCheckTimeHoldTailIgnoreJudgeWait()
+    => NotesManager.GetCurrentMsec() <= TailMsec - NoteJudge.JudgeHoldTailFrame;   // :169-172
+
+if (IsNoteCheckTimeHoldHeadIgnoreJudgeWait() && IsNoteCheckTimeHoldTailIgnoreJudgeWait())
+{
+    ...
+    HoldOn(LastHoldState);      // :312  ← 只有在这个 if 里才调
+}
+```
+
+玩家**按到 note 结束**（hold 的正确打法）时，进尾判窗口后游戏就不再调 `HoldOn`，
+最后一次是 `HoldOn(true)` —— 录不到 `Recorder.OnHoldOn()` 要的 `true -> false` 边沿：
+
+```csharp
+if (known && was && !on) { r.HasHoldEnd = true; r.HoldEndMsec = msec; }
+```
+
+于是 `HasHoldEnd` 恒为 false，回放的区间变成
+`inside = now >= r.HeadMsec && (!r.HasHoldEnd || ...)` → **后半段恒真 → 松手边沿永不触发**。
+
+**(2) 回放侧 —— 持续粒子挂在会被抢占的共享实例上。**
+v0.6.0 用 `F_JudgeEffect`（游戏那根轨道的共享 `TouchEffect`）拉持续粒子，而它是单槽状态机
+（`PlayParticles` 播一个槽会关掉其它所有槽，`Monitor/TouchEffect.cs:101-104`；
+`Execute` 在槽停时关掉整个 GameObject，`:250-256`），同时被这些**输入驱动**路径写：
+
+| 写入方 | 调用 | 实例 |
+|---|---|---|
+| `GameCtrl.cs:604-609` | 玩家按键 → `Initialize()`（槽 0） | `_touchEffectObjectList[lane]` |
+| `GameCtrl.cs:619-622` | 玩家碰 C 区 → `Initialize()`（槽 0） | `_touchEffectCObjectList[0]` |
+| `*HoldNote.NoteCheck():299-306` | 按住 / 松手的边沿 | 同上 |
+
+两个放大因素：
+
+- **tap 与 hold 共用同一个实例** —— `GameCtrl.cs:1480 / 1507 / 1534 / 1561 / 1588 / 1615`
+  全是 `_touchEffectObjectList[lane]`（Tap / Hold / BreakHold / Star / BreakStar / Break）。
+  v0.7.0 的瞬时爆开也写这个实例，**一次 tap 爆开就能把持续中的 hold 粒子顶掉**。
+- **`TouchHoldC` 更极端** —— `GameCtrl.cs:1945` 把所有 C 区 touchhold 都指向
+  `_touchEffectCObjectList[0]`，**全场只有 1 个实例**；任一条松手 `StopHoldPlay()`
+  就会把其它还在按住的也停掉。游戏靠玩家每次重新触摸再触发一次 `InitializeHold` 补回来，
+  回放里没有这个触摸，所以补不回来。
+
+**关键区别**：瞬时爆开只要有一帧就够了；持续粒子要求**整个按住期间一直不被抢走**，
+而 v0.6.0 只在进入区间时拉起过一次 → 被打断就再也回不来。
+
+#### 修法
+
+**(1) 录制侧（`Recorder.OnNoteJudged`，不新增补丁）**：hold 结算时若仍处于「按住」状态，
+就把松手时刻补记为当前判定时刻。`_holding` 只由 hold 的 `HoldOn` 填充，所以这个判断
+天然只对 hold 生效，不需要分辨 note 类型。顺带让 v0.6.0 的贴图区间也终于有了右端点。
+
+**(2) 回放侧（`ReplayInjector`）**：
+
+- **独立的专属实例** `_ghostHoldFx` —— 与 v0.7.0 的瞬时爆开实例 `_ghostFx` **分开**，
+  持续粒子再也不会被 tap 爆开顶掉。
+- **引用计数** `_holdRefCount` —— 同一实例上多条 hold 共存时（C 区 touchhold 链必然如此），
+  只有最后一条松手才真的 `StopHoldPlay()`。
+- **窗口内自愈**：专属实例上只有我们写，所以「槽 2 不在了」就说明它被我们自己顶掉或已播完。
+  用 `TouchEffect` 的私有 `_playingIndex` 判断当前槽号（取不到就退回 public 的
+  `gameObject.activeSelf`），不在槽 2 就补一次 `InitializeHold`（100ms 节流）。
+  **这样不管粒子本身是不是循环、也不管谁把它顶掉，整个按住期间都会持续显示。**
+- **结算镜像**：三种 hold 的 `Execute()` 都无条件调 `NoteCheck()`、而 `EndNote()` 是在
+  `NoteCheck()` 内部调的，所以结算那一帧我们的 Postfix 必定跑到一次且已是终态。
+  在那里把游戏 `EndNote()` 的调用镜像到专属实例：
+  `FinishHold(GetJudgeResult())`，破防 hold 再补 `InitializeBreak(...)`
+  （对应 `HoldNote.cs:493` / `BreakHoldNote.cs:478-480` / `TouchHoldC.cs:479`）。
+  这条同时兜住「旧录制数据 `HasHoldEnd` 仍缺失」的情况，保证粒子不会卡住。
+- **三个收尾时机都会停**，避免粒子常驻：松手边沿、note 结算、`BeginSong()` 全停 + 计数清零。
+
+#### 附带变更
+
+- 新增日志 `回放 hold 粒子: 起 a 条 / 止 b 条 / 重放 c 次 / 结算 d 条`；`起` 应等于 `回放 hold 保持态` 的条数
+- 版本 `0.7.0` → `0.7.1`；**补丁数不变（36/36）**，`Patches.cs` 未改动。
+  **反射查找 33 → 34** —— 新增一条 `Monitor.TouchEffect.f:_playingIndex`（已加进 `VerifyPatches.ps1` 的校验表）
+- 已知可接受的取舍：专属 hold 实例在「某条轨道第一次出现 hold note」时创建（不是头判那一刻），
+  把 7 个粒子 prefab 的实例化开销提前到 note 飞来的阶段，避免判定瞬间掉帧
+
+---
+
+## v0.7.2.1
+
+移除了一些者。
 
 ---

@@ -112,6 +112,15 @@ namespace MaimaiGhostReplay
         public static bool BaseIsLong;
         public static int BaseTrackNumber = -1;
 
+        /// <summary>
+        /// v0.7.2：第二首的「消费点复检」是否已经做过。
+        /// MusicSelectSequence.OnStartSequence() 不只在进列表时跑 ——
+        /// 玩家按 5 退回 Genre 再进 Music 也会再跑一次。
+        /// 不做成一次性的话，就会把「想改选」的玩家反复拽回录制曲目，
+        /// 直接违背需求 4（玩家换了歌/难度就该退出记录模式）。
+        /// </summary>
+        public static bool SecondSelectReasserted;
+
         /// <summary>回放是否生效。</summary>
         public static bool Replaying
         {
@@ -134,6 +143,7 @@ namespace MaimaiGhostReplay
             BaseDifficulty = -1;
             BaseIsLong = false;
             BaseTrackNumber = -1;
+            SecondSelectReasserted = false;
             ResetTimer(0);
             ResetTimer(1);
         }
@@ -144,6 +154,7 @@ namespace MaimaiGhostReplay
             Phase = GhostPhase.Idle;
             Recording = null;
             Record = null;
+            SecondSelectReasserted = false;
             ResetTimer(0);
             ResetTimer(1);
         }

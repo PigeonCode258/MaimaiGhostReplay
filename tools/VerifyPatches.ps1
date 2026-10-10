@@ -150,7 +150,9 @@ $memberChecks = @(
     @{ T = 'Monitor.BreakHoldNote';             M = 'm:HoldOn(Boolean)';        W = 'holdbody: sprite swap' }
     @{ T = 'Monitor.TouchHoldC';                M = 'm:HoldOn(Boolean)';        W = 'holdbody: sprite swap' }
     @{ T = 'Monitor.TouchEffect';               M = 'm:InitializeHold(ETiming)';W = 'holdbody: start effect' }
-    @{ T = 'Monitor.TouchEffect';               M = 'm:StopHoldPlay()';         W = 'holdbody: stop effect' })
+    @{ T = 'Monitor.TouchEffect';               M = 'm:StopHoldPlay()';         W = 'holdbody: stop effect' }
+    # v0.7.1 hold persistent particle: which slot is playing (private)
+    @{ T = 'Monitor.TouchEffect';               M = 'f:_playingIndex';          W = 'holdfx: slot 2 = HoldOn' })
 
 Write-Host "`n--- runtime reflection lookups ---"
 $mOk = 0; $mBad = 0

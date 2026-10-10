@@ -1,6 +1,51 @@
 ﻿// ============================================================================
 //  ReplayInjector.cs —— 回放注入层
 //
+//  v0.7.1 修复：hold / touchhold 的「按住时持续显示的那个粒子」在回放里看不到。
+//    两个独立问题叠加：
+//
+//    (1) 录制侧 —— hold 的按住区间缺右端点。
+//      游戏只在尾判窗口之外才调 HoldOn（HoldNote.cs:169-172 的
+//      IsNoteCheckTimeHoldTailIgnoreJudgeWait 让 :263 那个 if 不再成立，
+//      于是 :312 的 HoldOn(LastHoldState) 也不再执行）。
+//      玩家「按到 note 结束」时我们看不到 true->false 边沿 → HasHoldEnd 恒 false
+//      → 区间 [HeadMsec, HoldEndMsec] 没有右端点 → 松手边沿永不触发。
+//      修法见 Recorder.OnNoteJudged()。
+//
+//    (2) 回放侧 —— 持续粒子挂在会被抢占的**共享**实例上。
+//      v0.6.0 用 F_JudgeEffect（= 游戏那根轨道的共享 TouchEffect）拉持续粒子，
+//      而 TouchEffect 是单槽状态机（PlayParticles 播一个槽会关掉其它所有槽，
+//      Monitor/TouchEffect.cs:101-104；Execute 在槽停时关掉整个 GameObject，:250-256），
+//      这个实例同时被这些输入驱动路径写：
+//        GameCtrl.cs:604-609   玩家每按一次键 → Initialize()（槽 0）
+//        GameCtrl.cs:619-622   玩家每次碰 C 区 → Initialize()（槽 0）
+//        *HoldNote.NoteCheck():299-306  按住/松手的边沿
+//      更糟的是 tap 与 hold 共用同一个实例
+//      （GameCtrl.cs:1480/1507/1534/1561/1588/1615 全是 _touchEffectObjectList[lane]），
+//      而 TouchHoldC 更极端 —— GameCtrl.cs:1945 把所有 C 区 touchhold 都指向
+//      _touchEffectCObjectList[0]，全场只有 1 个实例。
+//      瞬时爆开只要有一帧就够了，持续粒子却要求整个按住期间一直不被抢走，
+//      而 v0.6.0 只在进入区间时拉起过一次 → 被打断就再也回不来。
+//      修法：改用**专属实例** _ghostHoldFx（与 v0.7.0 的瞬时爆开实例分开）+
+//      引用计数（多条共存互不干扰）+ 窗口内自愈重放。
+//
+//  v0.7.0 新增：打击特效。
+//    症状：回放判定命中的 note 看不到打击特效（判定文字是正常的）。
+//    根因：判定文字与打击粒子是 EndNote() 里紧挨着的两行
+//      Monitor/NoteBase.cs:348  JudgeGradeObject.Initialize(...);
+//      Monitor/NoteBase.cs:355  JudgeEffectObject.Initialize(...);
+//    文字出来了说明 EndNote() 确实跑了、粒子也确实被请求了 —— 但粒子被吃掉了。
+//    因为每根轨道只有 **一个** TouchEffect 实例，被两方共用：
+//      GameCtrl.cs:1480       RegistNote 把它交给 note（SetJudgeObject）
+//      GameCtrl.cs:604-609    玩家每按一次键就调同一个实例的 Initialize()
+//    而 TouchEffect 内部是单状态机：PlayParticles() 播一个槽会关掉其它所有槽
+//    （Monitor/TouchEffect.cs:101-104），Execute() 在粒子停时把整个 GameObject
+//    关掉（:250-256）。玩家在第二首里一直操作，按键那一发和回放判定那一发
+//    互相抢占，判定粒子基本看不到。
+//    做法：不再和游戏/玩家抢那个共享实例，而是每根轨道克隆一个「只有回放会用」
+//    的 TouchEffect，挂在同一根轨道的 launcher 下（位置/朝向天然一致），
+//    再从 InjectNoteBase() 里按 note 家族调用游戏自己的入口。
+//
 //  v0.6.0 新增：hold 的「保持态视觉」。
 //    v0.5.1 修好了判定与分数，但回放时玩家并没真的按住，游戏每帧调 HoldOn(false)，
 //    于是 hold 全程是「松手」贴图，只有最后蹦一个判定。
@@ -94,12 +139,46 @@ namespace MaimaiGhostReplay
         public static int HoldNoHead;         // 录制里就没有头判（原本也没按上）的 hold 数
         public static int HoldBodyFaked;      // 补出「按住」视觉的 hold 数
 
+        // v0.7.0：补出的打击特效次数（按 note 家族分列，日志用）
+        public static int HitFxCount;
+        public static int HitFxTap;           // TapNote / StarNote / TouchNoteC 系
+        public static int HitFxEx;            // Ex note
+        public static int HitFxBreak;         // BreakNote / BreakStarNote
+        public static int HitFxTouch;         // TouchNoteB 及其子类
+
+        // v0.7.1：hold 的「按住持续粒子」统计（日志用）
+        public static int HoldFxStart;        // 拉起持续粒子的次数
+        public static int HoldFxStop;         // 真正停掉的次数（引用计数归零）
+        public static int HoldFxReplay;       // 窗口内自愈重放的次数
+        public static int HoldFxTail;         // 结算时补的松手 / 破防爆开次数
+
         // ------------------------------------------------------------ 内部状态
         private static readonly HashSet<int> _handled = new HashSet<int>();
         private static readonly HashSet<int> _injected = new HashSet<int>();
         private static readonly HashSet<int> _slideCounted = new HashSet<int>();
         // 保持态视觉：当前正被我们补成「按住」的 hold
         private static readonly HashSet<int> _holdGhostOn = new HashSet<int>();
+        // v0.7.1：已经走到结算、处理过收尾特效的 hold
+        private static readonly HashSet<int> _holdFinished = new HashSet<int>();
+        // v0.7.0 打击特效：每根轨道一个「幽灵专用」实例，key = 游戏那个共享 TouchEffect。
+        // 刻意不随 BeginSong() 清理 —— 游戏的 TouchEffect 是开局建一次、跨局复用的，
+        // 我们的兄弟节点跟着复用，避免每局重建对象、也避免引用失效。
+        private static readonly Dictionary<Monitor.TouchEffect, Monitor.TouchEffect> _ghostFx =
+            new Dictionary<Monitor.TouchEffect, Monitor.TouchEffect>();
+        // v0.7.1：hold 的「持续粒子」单独一套实例。
+        // 持续粒子生命周期远长于瞬时爆开，共用会被顶掉，所以必须分开。
+        private static readonly Dictionary<Monitor.TouchEffect, Monitor.TouchEffect> _ghostHoldFx =
+            new Dictionary<Monitor.TouchEffect, Monitor.TouchEffect>();
+        // 同一个实例上可能同时有多条 hold 按住（TouchHoldC 全场共用 1 个实例），
+        // 引用计数保证「最后一条松手才停」。每局清空。
+        private static readonly Dictionary<Monitor.TouchEffect, int> _holdRefCount =
+            new Dictionary<Monitor.TouchEffect, int>();
+        // 自愈重放的节流（避免粒子资源异常时逐帧重启）
+        private static float _lastHoldAssertMsec;
+        // TouchEffect 当前正在播哪个粒子槽（0=Touch 1=Tap 2=HoldOn 3=HoldOff
+        // 4=ExTap 5=Break 6=Center）。private，取不到就退回 public 的 activeSelf 判断。
+        private static readonly FieldInfo F_FxPlayingIndex =
+            Reflect.FindField(typeof(Monitor.TouchEffect), "_playingIndex");
         private static readonly System.Type[] _argBool = new System.Type[] { typeof(bool) };
         private static readonly object[] _invokeArgs = new object[1];
 
@@ -124,6 +203,26 @@ namespace MaimaiGhostReplay
             HoldNoHead = 0;
             HoldBodyFaked = 0;
             _holdGhostOn.Clear();
+            HitFxCount = 0;
+            HitFxTap = 0;
+            HitFxEx = 0;
+            HitFxBreak = 0;
+            HitFxTouch = 0;
+            HoldFxStart = 0;
+            HoldFxStop = 0;
+            HoldFxReplay = 0;
+            HoldFxTail = 0;
+            _holdFinished.Clear();
+            _lastHoldAssertMsec = 0f;
+
+            // v0.7.1：把上一局可能残留的 hold 持续粒子收干净，避免卡住不放
+            foreach (Monitor.TouchEffect fx in _ghostHoldFx.Values)
+            {
+                if (fx == null) continue;
+                try { fx.StopAll(); }
+                catch (System.Exception) { }
+            }
+            _holdRefCount.Clear();
         }
 
         /// <summary>读取 slide 的 NoteIndex。</summary>
@@ -180,6 +279,89 @@ namespace MaimaiGhostReplay
         }
 
         // ================================================================
+        //  打击特效（v0.7.0）
+        //
+        //  为什么不复用游戏那个 JudgeEffectObject：每根轨道只有 1 个 TouchEffect
+        //  实例，note 判定和玩家按键共用它，而它内部是单状态机（同时只有一个粒子槽
+        //  在播，播新的会关掉旧的）。玩家在第二首里一直操作，两个来源互相抢占，
+        //  回放判定那一发就被吃掉了。自带一个实例彻底绕开这个争用。
+        //
+        //  位置与朝向天然正确：父节点就是那根轨道 launcher 的 "NoteEnd"，
+        //  和游戏自己的特效同级同位（GameCtrl.cs:996-999 就是这么建的）。
+        // ================================================================
+
+        /// <summary>
+        /// 克隆一个「只有回放会用」的 TouchEffect，挂在同一根轨道的 launcher 下。
+        /// 父节点取游戏那个实例的 transform.parent，所以位置与朝向天然正确
+        /// （GameCtrl.cs:996-999 建游戏自己的特效时用的就是这个父节点）。
+        /// </summary>
+        private static Monitor.TouchEffect CreateGhostFx(Monitor.TouchEffect gameFx, int monitorId)
+        {
+            try
+            {
+                // 资源容器还没初始化时直接放弃 —— 只影响特效，不影响判定与分数
+                if (GameNotePrefabContainer.TouchEffect == null) return null;
+
+                UnityEngine.Transform parent = gameFx.transform.parent;
+                Monitor.TouchEffect fx = UnityEngine.Object.Instantiate<Monitor.TouchEffect>(
+                    GameNotePrefabContainer.TouchEffect, parent);
+                if (fx == null) return null;
+
+                // 与游戏同一套粒子资源、同一 TapDesign / HoldDesign
+                fx.SetUpParticle(monitorId);
+                // 关键：SetUpParticle 会把 7 个粒子槽全播一遍，必须收掉
+                //（GameCtrl.cs:412 建完 launcher 后也是这么收尾的）
+                fx.StopAll();
+                return fx;
+            }
+            catch (System.Exception e)
+            {
+                GhostReplayMod.LogWarn("创建回放特效实例失败: " + e.Message);
+                return null;
+            }
+        }
+
+        /// <summary>取（必要时创建）某根轨道的「瞬时爆开」幽灵实例。失败返回 null。</summary>
+        private static Monitor.TouchEffect GhostFx(Monitor.TouchEffect gameFx, int monitorId)
+        {
+            Monitor.TouchEffect fx;
+            if (_ghostFx.TryGetValue(gameFx, out fx) && fx != null) return fx;
+
+            fx = CreateGhostFx(gameFx, monitorId);
+            if (fx == null) return null;
+            _ghostFx[gameFx] = fx;
+            return fx;
+        }
+
+        /// <summary>
+        /// 按 note 家族补一次打击特效，入口与游戏 EndNote() 里的调用一一对应。
+        /// 游戏对 miss 不出特效，这里也照做（TooFast / TooLate 经 ConvertJudge 都归 Miss）。
+        /// </summary>
+        private static void PlayHitEffect(Monitor.NoteBase nb)
+        {
+            if (nb == null || F_JudgeEffect == null) return;
+
+            NoteJudge.ETiming timing = nb.GetJudgeResult();
+            if (NoteJudge.ConvertJudge(timing) == NoteJudge.JudgeBox.Miss) return;
+
+            Monitor.TouchEffect gameFx;
+            try { gameFx = F_JudgeEffect.GetValue(nb) as Monitor.TouchEffect; }
+            catch (System.Exception) { return; }
+            if (gameFx == null) return;
+
+            Monitor.TouchEffect fx = GhostFx(gameFx, nb.MonitorId);
+            if (fx == null) return;
+
+            // 顺序敏感：BreakNote.EndNote() 只调 InitializeBreak、TouchNoteB.EndNote()
+            // 只调 InitializeCenter，两者都不看 ExNote，所以必须先判它们。
+            if (nb is Monitor.BreakNote) { fx.InitializeBreak(timing); HitFxBreak++; }
+            else if (nb is Monitor.TouchNoteB) { fx.InitializeCenter(timing); HitFxTouch++; }
+            else if (nb.ExNote) { fx.InitializeEx(timing); HitFxEx++; }
+            else { fx.Initialize(timing); HitFxTap++; }
+            HitFxCount++;
+        }
+
+        // ================================================================
         //  NoteBase 家族：Tap / Star / Break / BreakStar / Touch / TouchNoteC
         // ================================================================
         public static void InjectNoteBase(Monitor.NoteBase nb)
@@ -200,6 +382,9 @@ namespace MaimaiGhostReplay
             // 补判定音（EndNote 不会播）
             PlaySe(nb, "PlayJudgeSe");
             JudgeSeCount++;
+
+            // 补打击特效（游戏那一发会和玩家的按键抢同一个共享实例，见上方说明）
+            PlayHitEffect(nb);
         }
 
         // ================================================================
@@ -279,19 +464,21 @@ namespace MaimaiGhostReplay
         }
 
         // ================================================================
-        //  Hold 保持态视觉（v0.6.0）
+        //  Hold 保持态视觉（v0.6.0）+ 按住持续粒子（v0.7.1）
         //
-        //  判定与分数本来是对的，但回放时玩家并没有真的按住，于是
+        //  v0.6.0：判定与分数本来是对的，但回放时玩家并没有真的按住，于是
         //  HoldNote.NoteCheck() 里那个 flag 一直是 false → flag2 一直 false →
         //  游戏每帧都调 HoldOn(false)，hold 从头到尾都是「松手」贴图，
         //  只有最后蹦一个判定。
-        //
         //  做法：挂 NoteCheck() 的 **Postfix**（在游戏自己那次 HoldOn 之后），
-        //  按录制的按住区间 [HeadMsec, HoldEndMsec] 补一次 HoldOn(true)，
-        //  并把保持特效一起拉起 / 在松手边沿停掉。
+        //  按录制的按住区间 [HeadMsec, HoldEndMsec] 补一次 HoldOn(true)。
         //  HoldOn(bool) 对三种 hold 都是「换贴图」的那个函数：
         //    HoldNote / BreakHoldNote  → NoteObj 贴图 + HoldBodyOnFlg（发光）
         //    TouchHoldC                → HoldGaugeObject 贴图
+        //
+        //  v0.7.1：同一个 Postfix 里再把「按住的持续粒子」也管起来，
+        //  但改写到专属实例上（原因见下方那一段和文件头部）。
+        //  另外 Recorder 侧补了 HoldEndMsec —— 否则这里的区间没有右端点。
         // ================================================================
         private static void CallHoldOn(Monitor.NoteBase nb, bool on)
         {
@@ -308,23 +495,95 @@ namespace MaimaiGhostReplay
             }
         }
 
-        private static void SetHoldEffect(Monitor.NoteBase nb, bool start, NoteJudge.ETiming headResult)
+        // ----------------------------------------------------------------
+        //  v0.7.1：hold 的「按住持续粒子」改由专属实例驱动
+        //
+        //  游戏对应代码（三种 hold 同构）：
+        //    接到头判   HoldNote.cs:227-228   JudgeHoldHead(); InitializeHold(GetJudgeHeadResult());
+        //    按住边沿   HoldNote.cs:299-302   flag2 && !LastHoldState → InitializeHold(...)
+        //    松手边沿   HoldNote.cs:303-306   !flag2 && LastHoldState → StopHoldPlay()
+        //    结算       HoldNote.cs:493       FinishHold(GetJudgeResult())
+        //               BreakHoldNote.cs:478-480  FinishHold(...) 之后再来一次 InitializeBreak(...)
+        //               TouchHoldC.cs:479         FinishHold(GetJudgeResult())
+        //
+        //  回放里这些时刻我们都自己算（录制区间 + note 结算），但**必须写到自己的实例上** ——
+        //  写游戏那个共享实例会被玩家的按键/C 区触摸抢掉（见文件头部的说明）。
+        // ----------------------------------------------------------------
+
+        /// <summary>取本 note 所在轨道（或 C 区）的「hold 持续粒子」专属实例。失败返回 null。</summary>
+        private static Monitor.TouchEffect HoldFxOf(Monitor.NoteBase nb)
         {
-            try
+            if (nb == null || F_JudgeEffect == null) return null;
+
+            Monitor.TouchEffect gameFx;
+            try { gameFx = F_JudgeEffect.GetValue(nb) as Monitor.TouchEffect; }
+            catch (System.Exception) { return null; }
+            if (gameFx == null) return null;
+
+            Monitor.TouchEffect fx;
+            if (_ghostHoldFx.TryGetValue(gameFx, out fx) && fx != null) return fx;
+
+            fx = CreateGhostFx(gameFx, nb.MonitorId);
+            if (fx == null) return null;
+            _ghostHoldFx[gameFx] = fx;
+            return fx;
+        }
+
+        /// <summary>专属实例当前是否正在播「保持」槽（2）。取不到私有槽号时退回 activeSelf。</summary>
+        private static bool IsHoldSlotPlaying(Monitor.TouchEffect fx)
+        {
+            if (fx == null) return false;
+            if (F_FxPlayingIndex != null)
             {
-                if (F_JudgeEffect == null) return;
-                Monitor.TouchEffect fx = F_JudgeEffect.GetValue(nb) as Monitor.TouchEffect;
-                if (fx == null) return;
-                if (start) fx.InitializeHold(headResult);
-                else fx.StopHoldPlay();
+                try { return (int)F_FxPlayingIndex.GetValue(fx) == 2; }
+                catch (System.Exception) { }
             }
+            return fx.gameObject.activeSelf;
+        }
+
+        /// <summary>拉起持续粒子（引用计数 +1）。多条 hold 共用同一实例时互不干扰。</summary>
+        private static void BeginHoldFx(Monitor.TouchEffect fx, NoteJudge.ETiming headResult)
+        {
+            if (fx == null) return;
+            int n;
+            _holdRefCount.TryGetValue(fx, out n);
+            _holdRefCount[fx] = n + 1;
+            try { fx.InitializeHold(headResult); }
             catch (System.Exception) { }
+            HoldFxStart++;
+        }
+
+        /// <summary>松手（引用计数 -1）。只有减到 0 才真的停 —— 否则会误停其它还在按住的 hold。</summary>
+        private static void EndHoldFx(Monitor.TouchEffect fx)
+        {
+            if (fx == null) return;
+            int n;
+            if (!_holdRefCount.TryGetValue(fx, out n)) return;
+            n--;
+            if (n > 0) { _holdRefCount[fx] = n; return; }
+            _holdRefCount.Remove(fx);
+            try { fx.StopHoldPlay(); }
+            catch (System.Exception) { }
+            HoldFxStop++;
+        }
+
+        /// <summary>窗口内自愈重放（不动引用计数）。</summary>
+        private static void ReassertHoldFx(Monitor.TouchEffect fx, NoteJudge.ETiming headResult)
+        {
+            if (fx == null) return;
+            try { fx.InitializeHold(headResult); }
+            catch (System.Exception) { }
+            HoldFxReplay++;
         }
 
         /// <summary>
         /// 补丁点：HoldNote / BreakHoldNote / TouchHoldC 的 NoteCheck() Postfix。
         /// 必须在 Postfix —— 游戏自己在 NoteCheck 里每帧都会调 HoldOn(LastHoldState)，
         /// 我们在它之后再覆盖一次才有效。
+        ///
+        /// 三件事：①按住期间每帧补 HoldOn(true)（v0.6.0 的贴图/发光）
+        ///        ②按住期间让持续粒子一直在（v0.7.1）
+        ///        ③结算时把游戏 EndNote() 里那两行特效镜像到专属实例上（v0.7.1）
         /// </summary>
         public static void ForceHoldBody(Monitor.NoteBase nb, NoteJudge.ETiming headResult)
         {
@@ -332,6 +591,40 @@ namespace MaimaiGhostReplay
             if (!GhostState.Replaying) return;
 
             int idx = nb.GetNoteIndex();
+            Monitor.TouchEffect hfx = HoldFxOf(nb);
+
+            // ---- ③ 结算：EndNote() 已在本帧跑完 ----
+            // 三种 hold 的 Execute() 都无条件调 NoteCheck()（HoldNote.cs:213 /
+            // BreakHoldNote.cs:198 / TouchHoldC.cs:148），而 EndNote() 是在 NoteCheck()
+            // 内部被调的（HoldNote.cs:316 等），所以这里必定跑到一次，
+            // 且此时 EndFlag 已置位、GetJudgeResult() 已是终态。
+            // 这条同时兜住「旧录制数据 HasHoldEnd 仍然缺失」的情况，保证粒子不会卡住。
+            if (nb.IsEnd())
+            {
+                if (_holdFinished.Add(idx))
+                {
+                    if (_injected.Contains(idx))
+                    {
+                        NoteJudge.ETiming final = nb.GetJudgeResult();
+                        if (hfx != null)
+                        {
+                            try
+                            {
+                                hfx.FinishHold(final);
+                                // 破防 hold 的 EndNote 里 FinishHold 之后还有一次 InitializeBreak
+                                if (nb is Monitor.BreakHoldNote) hfx.InitializeBreak(final);
+                            }
+                            catch (System.Exception) { }
+                        }
+                        HoldFxTail++;
+                    }
+                    // 顺序要紧：先 FinishHold（可能是松手/爆开），再减引用计数。
+                    // 若录制尾判是 miss，FinishHold 内部就是 StopHoldPlay，此时计数已是空操作。
+                    if (_holdGhostOn.Remove(idx)) EndHoldFx(hfx);
+                }
+                return;
+            }
+
             bool inside = false;
 
             // 只有「我们注入过头判」的 hold 才补保持态
@@ -347,17 +640,31 @@ namespace MaimaiGhostReplay
 
             if (!inside)
             {
-                // 松手边沿：停掉保持特效（贴图交回游戏自己的 HoldOn(false)）
-                if (_holdGhostOn.Remove(idx)) SetHoldEffect(nb, false, headResult);
+                // 松手边沿：停掉持续粒子（贴图交回游戏自己的 HoldOn(false)）
+                if (_holdGhostOn.Remove(idx)) EndHoldFx(hfx);
                 return;
             }
 
             // 保持中：每一帧都补一次，压过游戏自己的 HoldOn(false)
             CallHoldOn(nb, true);
+
             if (_holdGhostOn.Add(idx))
             {
-                SetHoldEffect(nb, true, headResult);
+                // ① 进入按住区间：拉起持续粒子
+                BeginHoldFx(hfx, headResult);
                 HoldBodyFaked++;
+            }
+            else if (!IsHoldSlotPlaying(hfx))
+            {
+                // ② 自愈：专属实例上只有我们写，所以「槽 2 不在了」就说明它被我们自己的
+                //    其它调用顶掉、或粒子本身已经播完。补一次，保证整个按住期间都有显示。
+                //    加节流，避免粒子资源异常时逐帧重启造成闪烁。
+                float now2 = NotesManager.GetCurrentMsec();
+                if (now2 - _lastHoldAssertMsec >= 100f)
+                {
+                    ReassertHoldFx(hfx, headResult);
+                    _lastHoldAssertMsec = now2;
+                }
             }
         }
         // ================================================================

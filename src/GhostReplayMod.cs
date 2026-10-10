@@ -11,7 +11,7 @@ using System;
 using HarmonyLib;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(MaimaiGhostReplay.GhostReplayMod), "MaimaiGhostReplay", "0.6.0", "Sayori")]
+[assembly: MelonInfo(typeof(MaimaiGhostReplay.GhostReplayMod), "MaimaiGhostReplay", "0.7.2.1", "Sayori")]
 [assembly: MelonGame("sega-interactive", "Sinmai")]
 
 namespace MaimaiGhostReplay
@@ -58,7 +58,7 @@ namespace MaimaiGhostReplay
             HarmonyLib.Harmony harmony = new HarmonyLib.Harmony("maimai.ghostreplay");
             Patches.ApplyAll(harmony);
 
-            _log.Msg("[GhostReplay] MaimaiGhostReplay v0.6.0 已加载"
+            _log.Msg("[GhostReplay] MaimaiGhostReplay v0.7.2.1 已加载"
                 + "（手势：开始游戏页长按 1+2+7+8 " + (int)LongPressMs + "ms）");
         }
 
